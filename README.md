@@ -30,6 +30,10 @@ Supported games:
 - Sapphire
 - Emerald
 
+Supported regions/revisions:
+- USA and Europe revisions (all modes)
+- France revisions (auto/canonical/reroll modes; legacy/native threshold patching is not validated for FR ROMs)
+
 Supported clean USA/EU revisions are detected by CRC32 before patching. If the ROM is not a known clean match, patching is refused.
 
 ## Who Is It For And Why?
@@ -52,6 +56,21 @@ That means:
 - it keeps the normal `SetMonData` write path to avoid checksum corruption and Bad Eggs
 - it validates the ROM before writing anything
 - it always writes a new output ROM and does not overwrite the input ROM
+
+### Starter/gift legality note
+The public build re-rolls starters and script gifts through dedicated outer hooks (gift / starter / fixed-personality wrappers). On FireRed/LeafGreen those paths are still under active hardening upstream: starters can come out with a PID+IV combination that PKHeX flags as "PID Type: None" (PID+IV correlation does not match a known generation method), and rare odds can occasionally corrupt the starter. This affects USA/EU ROMs too (upstream issues #1/#2/#3); it is not specific to the FR revisions.
+
+If you want starters to stay PKHeX-legal, enable the starter-safe + Method-1 enforcement modes when launching:
+
+```bash
+set KIRAPATCH_STARTER_SAFE=1
+set KIRAPATCH_ENFORCE_METHOD1=1
+python shiny_patcher.py "Rouge Feu.gba" --odds 64 --mode auto
+```
+
+Or double-click `KiraPatch_STARTER_SAFE.bat` to open the GUI with both modes enabled. In this configuration the outer starter/gift/wrapper hooks are not installed (every creation, starters included, goes through the primary `CreateMon` reroll path), and the primary hook **rejects any shiny result whose PID+IVs do not form a valid Method-1 frame** (the correlation PKHeX expects for a static encounter), keeping rerolling until it finds one. Each shiny hit runs a short in-game check (~0.1-0.3 s), so a brief lag/freeze is expected on shiny encounters only.
+
+Result: no Bad Eggs and starters that stay PKHeX-legal (Method-1) instead of the vanilla-reroll's "PID Type: None"/"Method_2", at the cost of not boosting fixed-personality script gifts.
 
 Important note about high rates:
 - `1/64` is the current hardening target for the next stricter release
@@ -137,6 +156,11 @@ python shiny_patcher.py
 - `0xD69C96CC` - Pokemon LeafGreen Version (USA) Rev 0
 - `0xDAFFECEC` - Pokemon LeafGreen Version (USA, Europe) Rev 1
 - `0x1F1C08FB` - Pokemon Emerald Version (USA, Europe) Rev 0
+- `0x690FD310` - Pokemon Ruby Version (France) Rev 0
+- `0x3581A05F` - Pokemon Sapphire Version (France) Rev 0
+- `0x5DC668F6` - Pokemon FireRed Version (France) Rev 0
+- `0xBA3285E3` - Pokemon LeafGreen Version (France) Rev 0
+- `0xA3FDCCB1` - Pokemon Emerald Version (France) Rev 0
 
 ## End
 KiraPatch is built around one goal: higher shiny odds in Gen 3 without fake shinies, checksum corruption, or PKHeX legality problems.

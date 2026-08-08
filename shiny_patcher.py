@@ -23,6 +23,9 @@ class RomSpec:
     revision: str
     crc32: int
     patch_sites: tuple[PatchSite, ...]
+    # Anchor for canonical reroll mode when patch_sites does not carry it
+    # (used by localized ROMs that only support canonical/auto/reroll).
+    canonical_cmp_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -212,7 +215,62 @@ ROM_SPECS: tuple[RomSpec, ...] = (
     ),
 )
 
+# French (France) revisions share the same code layout signatures as the
+# USA/Europe revisions, so the canonical reroll path works unchanged once the
+# CreateMon shiny-check anchor is known. Legacy/native threshold offsets are
+# not validated for these revisions, so they only expose canonical_cmp_offset.
+ROM_SPECS_FR: tuple[RomSpec, ...] = (
+    RomSpec(
+        name="Pokemon Ruby Version (France)",
+        game_code="AXVF",
+        revision="0",
+        crc32=0x690FD310,
+        patch_sites=(),
+        canonical_cmp_offset=0x03AA76,
+    ),
+    RomSpec(
+        name="Pokemon Sapphire Version (France)",
+        game_code="AXPF",
+        revision="0",
+        crc32=0x3581A05F,
+        patch_sites=(),
+        canonical_cmp_offset=0x03AA76,
+    ),
+    RomSpec(
+        name="Pokemon FireRed Version (France)",
+        game_code="BPRF",
+        revision="0",
+        crc32=0x5DC668F6,
+        patch_sites=(),
+        canonical_cmp_offset=0x03DA36,
+    ),
+    RomSpec(
+        name="Pokemon LeafGreen Version (France)",
+        game_code="BPGF",
+        revision="0",
+        crc32=0xBA3285E3,
+        patch_sites=(),
+        canonical_cmp_offset=0x03DA36,
+    ),
+    RomSpec(
+        name="Pokemon Emerald Version (France)",
+        game_code="BPEF",
+        revision="0",
+        crc32=0xA3FDCCB1,
+        patch_sites=(),
+        canonical_cmp_offset=0x067C56,
+    ),
+)
+
+ROM_SPECS = ROM_SPECS + ROM_SPECS_FR
+
 ROM_SPECS_BY_CRC = {spec.crc32: spec for spec in ROM_SPECS}
+
+# Game-code families (localized revisions share behavior with their base game).
+RS_GAME_CODES = frozenset({"AXVE", "AXPE", "AXVF", "AXPF"})
+FRLG_GAME_CODES = frozenset({"BPRE", "BPGE", "BPRF", "BPGF"})
+FIRERED_GAME_CODES = frozenset({"BPRE", "BPRF"})
+RUBY_GAME_CODES = frozenset({"AXVE", "AXVF"})
 
 BASE_SHINY_NUMERATOR = 65536
 BASE_THRESHOLD = 8
@@ -220,6 +278,14 @@ MAX_NATIVE_THRESHOLD = 255
 MAX_CANONICAL_REROLL_ATTEMPTS = 1024
 SUPPORTED_CANONICAL_ODDS_FLOOR = 64
 STRETCH_CANONICAL_ODDS = 32
+
+# Gen 3 LCG constants (Random()) and the substructure shuffle used to locate
+# the misc block (which holds the IV word at bytes 4-7) inside an encrypted
+# box mon. MISC_SRC[i] = storage block index (0-3) holding the misc
+# substructure when pid % 24 == i.
+LCG_MULT = 0x41C64E6D
+LCG_ADD = 0x6073
+MISC_SRC = bytes((3, 2, 3, 1, 2, 1, 3, 2, 3, 0, 2, 0, 3, 1, 3, 0, 1, 0, 2, 1, 2, 0, 1, 0))
 THUMB_BL_MIN_DELTA = -0x400000
 THUMB_BL_MAX_DELTA = 0x3FFFFE
 ROM_EXEC_BASE = 0x08000000
@@ -1024,6 +1090,8 @@ def find_secondary_create_box_wrapper_sites(
     return sites
 
 def canonical_cmp_site(spec: RomSpec) -> PatchSite:
+    if spec.canonical_cmp_offset is not None:
+        return PatchSite(spec.canonical_cmp_offset, 0x07, "odds_minus_one")
     candidates = [s for s in spec.patch_sites if s.kind == "odds_minus_one" and s.default_value == 0x07]
     if not candidates:
         raise ValueError("Canonical patch site not found for this ROM.")
@@ -1060,6 +1128,109 @@ def encode_thumb_b(from_addr: int, target_addr: int) -> bytes:
     return hw.to_bytes(2, "little")
 
 
+def emit_method1_verify(
+    emit_hw,
+    emit_ldr_literal,
+    mark,
+    emit_b_cond,
+    emit_b,
+) -> None:
+    """Emit the in-game Method-1 PID/IV legality verifier.
+
+    Runs after CreateMon/box-mon has generated a mon: extracts the PID and the
+    (encrypted) IV word, then checks whether PID+IVs form a valid Method-1 LCG
+    frame (PID from two consecutive Random() outputs, IVs from the next two).
+    Returns r0 = 1 if valid, 0 if not. Preserves r4-r7 and r8.
+    """
+    # preserve the hook's live registers (r4-r7 are live in CreateMon's frame)
+    emit_hw(0xB4F0)  # push {r4,r5,r6,r7}
+    emit_hw(encode_thumb_high(2, 0, 8))
+    emit_hw(encode_thumb_ldr_imm(2, 0, 0))
+    emit_hw(encode_thumb_high(2, 9, 2))  # r9 = pid
+    emit_hw(encode_thumb_ldr_imm(3, 0, 4))
+    emit_hw(encode_thumb_eors(2, 3))
+    emit_hw(encode_thumb_high(2, 10, 2))  # r10 = key = pid ^ otid
+    # pid % 24 -> r3
+    emit_hw(encode_thumb_high(2, 0, 9))
+    emit_hw(encode_thumb_lsrs(3, 0, 16))
+    emit_hw(encode_thumb_lsls(3, 3, 4))
+    emit_hw(encode_thumb_lsls(0, 0, 16))
+    emit_hw(encode_thumb_lsrs(0, 0, 16))
+    emit_hw(encode_thumb_adds_r(3, 3, 0))
+    for const, lab in ((0x60000, "m1r1"), (0x6000, "m1r2"), (0x180, "m1r3"), (0x18, "m1r4")):
+        emit_ldr_literal(1, f"{lab}_const")
+        mark(f"{lab}_loop")
+        emit_hw(encode_thumb_cmp(3, 1))
+        emit_b_cond(3, f"{lab}_done")  # bcc done
+        emit_hw(encode_thumb_subs_r(3, 3, 1))
+        emit_b(f"{lab}_loop")
+        mark(f"{lab}_done")
+    # misc_src = MISC_SRC[pid%24] -> r7
+    emit_ldr_literal(7, "m1_misc_addr")
+    emit_hw(encode_thumb_adds_r(7, 7, 3))
+    emit_hw(encode_thumb_ldrb_imm(7, 7, 0))
+    # iv_word = (ldr[mon+0x20+misc*12+4]) ^ key ; & 0x3FFFFFFF
+    emit_hw(encode_thumb_high(2, 0, 8))
+    emit_hw(encode_thumb_add_imm(0, 0x20))
+    emit_hw(encode_thumb_high(2, 1, 7))
+    emit_hw(encode_thumb_lsls(1, 1, 2))
+    emit_hw(encode_thumb_adds_r(0, 0, 1))
+    emit_hw(encode_thumb_lsls(1, 1, 1))
+    emit_hw(encode_thumb_adds_r(0, 0, 1))
+    emit_hw(encode_thumb_add_imm(0, 4))
+    emit_hw(encode_thumb_ldr_imm(0, 0, 0))
+    emit_hw(encode_thumb_high(2, 1, 10))
+    emit_hw(encode_thumb_eors(0, 1))
+    emit_ldr_literal(1, "m1_mask")
+    emit_hw(encode_thumb_ands(0, 1))
+    # iv1 = iv_word & 0x7FFF ; iv2 = iv_word >> 15
+    emit_hw(encode_thumb_lsls(1, 0, 17))
+    emit_hw(encode_thumb_lsrs(1, 1, 17))
+    emit_hw(encode_thumb_high(2, 11, 1))  # r11 = iv1
+    emit_hw(encode_thumb_lsrs(0, 0, 15))
+    emit_hw(encode_thumb_high(2, 12, 0))  # r12 = iv2
+    # LCG loop registers: r0=counter, r1=acc, r2=temp, r3=ADD, r4=MULT,
+    # r5=pid_hi, r6=terminator, r9=pid, r11=iv1, r12=iv2
+    emit_ldr_literal(4, "m1_mult")
+    emit_ldr_literal(3, "m1_add")
+    emit_hw(encode_thumb_high(2, 5, 9))
+    emit_hw(encode_thumb_lsrs(5, 5, 16))  # r5 = pid_hi
+    emit_ldr_literal(6, "m1_term")
+    emit_hw(encode_thumb_movs_imm(0, 0))
+    mark("m1_loop")
+    emit_hw(encode_thumb_high(2, 1, 9))
+    emit_hw(encode_thumb_lsls(1, 1, 16))
+    emit_hw(encode_thumb_adds_r(1, 1, 0))  # s1 = (pid_lo<<16)|counter
+    emit_hw(encode_thumb_muls(1, 4))
+    emit_hw(encode_thumb_adds_r(1, 1, 3))  # s2
+    emit_hw(encode_thumb_lsrs(2, 1, 16))
+    emit_hw(encode_thumb_cmp(2, 5))  # s2>>16 vs pid_hi
+    emit_b_cond(1, "m1_next")  # bne next
+    emit_hw(encode_thumb_muls(1, 4))
+    emit_hw(encode_thumb_adds_r(1, 1, 3))  # s3
+    emit_hw(encode_thumb_lsrs(2, 1, 16))
+    emit_hw(encode_thumb_lsls(2, 2, 17))
+    emit_hw(encode_thumb_lsrs(2, 2, 17))  # & 0x7FFF
+    emit_hw(encode_thumb_high(1, 2, 11))  # cmp r2, r11 (iv1)
+    emit_b_cond(1, "m1_next")
+    emit_hw(encode_thumb_muls(1, 4))
+    emit_hw(encode_thumb_adds_r(1, 1, 3))  # s4
+    emit_hw(encode_thumb_lsrs(2, 1, 16))
+    emit_hw(encode_thumb_lsls(2, 2, 17))
+    emit_hw(encode_thumb_lsrs(2, 2, 17))  # & 0x7FFF
+    emit_hw(encode_thumb_high(1, 2, 12))  # cmp r2, r12 (iv2)
+    emit_b_cond(1, "m1_next")
+    emit_hw(encode_thumb_movs_imm(0, 1))  # valid
+    emit_b("m1_done")
+    mark("m1_next")
+    emit_hw(encode_thumb_add_imm(0, 1))
+    emit_hw(encode_thumb_cmp(0, 6))  # counter vs terminator
+    emit_b_cond(1, "m1_loop")  # bne loop
+    emit_hw(encode_thumb_movs_imm(0, 0))  # invalid
+    mark("m1_done")
+    emit_hw(0xBCF0)  # pop {r4,r5,r6,r7}
+
+
 def build_canonical_create_mon_hook(
     cave_offset: int,
     retry_target: int,
@@ -1070,6 +1241,7 @@ def build_canonical_create_mon_hook(
     skip_caller_returns: tuple[int, ...],
     skip_mode: str = "all",
     debug_trace_tag: int | None = None,
+    enforce_method1: bool = False,
 ) -> bytes:
     hook = bytearray()
     labels: dict[str, int] = {}
@@ -1171,9 +1343,10 @@ def build_canonical_create_mon_hook(
     emit_hw(0x0409)  # lsl r1,r1,#16
     emit_hw(0x0C09)  # lsr r1,r1,#16
     emit_hw(0x2907)  # cmp r1,#7
-    emit_b_cond(9, "shiny_done")  # bls shiny_done (already shiny)
+    emit_b_cond(9, "shiny_check" if enforce_method1 else "shiny_done")
 
     # Use a caller-specific stack slot so retries persist without clobbering live args.
+    mark("counter_load")
     emit_hw(0x9800 | (counter_sp_word & 0xFF))  # ldr r0,[sp,#counter_slot]
     emit_hw(0x0C01)  # lsr r1,r0,#16
     emit_ldr_literal(2, "counter_magic_hi")
@@ -1200,6 +1373,15 @@ def build_canonical_create_mon_hook(
         emit_trace_count_increment(1, 3, DEBUG_TRACE_COUNT_RETRY_OFFSET)
     emit_ldr_literal(0, "retry_addr")
     emit_hw(0x4700)  # bx r0 (jump back to caller retry-entry block)
+
+    if enforce_method1:
+        # A shiny result is only accepted if its PID+IVs form a Method-1 frame;
+        # otherwise keep rerolling so starters stay PKHeX-legal.
+        mark("shiny_check")
+        emit_method1_verify(emit_hw, emit_ldr_literal, mark, emit_b_cond, emit_b)
+        emit_hw(0x2800)  # cmp r0,#0
+        emit_b_cond(1, "shiny_done")  # bne shiny_done (Method-1 valid)
+        emit_b("counter_load")        # invalid -> retry again
 
     mark("shiny_done")
     if debug_trace_tag is not None:
@@ -1249,6 +1431,34 @@ def build_canonical_create_mon_hook(
     for idx, skip_return in enumerate(skip_caller_returns):
         mark(f"skip_return_{idx}")
         hook.extend((skip_return & 0xFFFFFFFF).to_bytes(4, "little"))
+
+    if enforce_method1:
+        for label, value in (
+            ("m1r1_const", 0x60000),
+            ("m1r2_const", 0x6000),
+            ("m1r3_const", 0x180),
+            ("m1r4_const", 0x18),
+            ("m1_mask", 0x3FFFFFFF),
+            ("m1_mult", LCG_MULT),
+            ("m1_add", LCG_ADD),
+            ("m1_term", 0x10000),
+        ):
+            mark(label)
+            hook.extend((value & 0xFFFFFFFF).to_bytes(4, "little"))
+        # Self-referential address literal: a placeholder word that is patched
+        # to the absolute address of the MISC_SRC table right below it.
+        mark("m1_misc_addr")
+        misc_addr_offset = len(hook)
+        hook.extend((0).to_bytes(4, "little"))
+        mark("m1_misc_table")
+        misc_table_offset = len(hook)
+        hook.extend(MISC_SRC)
+        while len(hook) % 4:
+            hook.append(0)
+        # The verifier indexes the table via its mapped (execution) address.
+        hook[misc_addr_offset : misc_addr_offset + 4] = (
+            ROM_EXEC_BASE + cave_offset + misc_table_offset
+        ).to_bytes(4, "little")
 
     for kind, pos, label, extra in fixups:
         if label not in labels:
@@ -1434,6 +1644,78 @@ def encode_thumb_add_imm(rd: int, imm: int) -> int:
     if not 0 <= imm <= 0xFF:
         raise ValueError(f"Unsupported ADD immediate: {imm}")
     return 0x3000 | ((rd & 0x7) << 8) | (imm & 0xFF)
+
+
+def encode_thumb_lsls(rd: int, rs: int, imm: int) -> int:
+    if not (0 <= rd <= 7 and 0 <= rs <= 7) or not 0 <= imm <= 31:
+        raise ValueError(f"Unsupported LSLS: rd={rd} rs={rs} imm={imm}")
+    return 0x0000 | ((imm & 0x1F) << 6) | ((rs & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_lsrs(rd: int, rs: int, imm: int) -> int:
+    if not (0 <= rd <= 7 and 0 <= rs <= 7) or not 0 <= imm <= 31:
+        raise ValueError(f"Unsupported LSRS: rd={rd} rs={rs} imm={imm}")
+    return 0x0800 | ((imm & 0x1F) << 6) | ((rs & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_adds_r(rd: int, rn: int, rm: int) -> int:
+    if not (0 <= rd <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7):
+        raise ValueError("Thumb ADDS register only supports low registers.")
+    return 0x1800 | ((rm & 0x7) << 6) | ((rn & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_subs_r(rd: int, rn: int, rm: int) -> int:
+    if not (0 <= rd <= 7 and 0 <= rn <= 7 and 0 <= rm <= 7):
+        raise ValueError("Thumb SUBS register only supports low registers.")
+    return 0x1A00 | ((rm & 0x7) << 6) | ((rn & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_movs_imm(rd: int, imm: int) -> int:
+    if not 0 <= rd <= 7 or not 0 <= imm <= 0xFF:
+        raise ValueError(f"Unsupported MOVS immediate: rd={rd} imm={imm}")
+    return 0x2000 | ((rd & 0x7) << 8) | (imm & 0xFF)
+
+
+def encode_thumb_alu(op: int, rd: int, rs: int) -> int:
+    if not (0 <= op <= 15 and 0 <= rd <= 7 and 0 <= rs <= 7):
+        raise ValueError(f"Unsupported ALU: op={op} rd={rd} rs={rs}")
+    return 0x4000 | ((op & 0xF) << 6) | ((rs & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_ldrb_imm(rd: int, rb: int, imm: int) -> int:
+    if not (0 <= rd <= 7 and 0 <= rb <= 7) or not 0 <= imm <= 31:
+        raise ValueError(f"Unsupported LDRB immediate: rd={rd} rb={rb} imm={imm}")
+    return 0x7800 | ((imm & 0x1F) << 6) | ((rb & 0x7) << 3) | (rd & 0x7)
+
+
+def encode_thumb_high(op: int, rd: int, rm: int) -> int:
+    # op: 0=ADD, 1=CMP, 2=MOV, 3=BX ; rd/rm may be high registers (8-15)
+    if not (0 <= rd <= 15 and 0 <= rm <= 15 and 0 <= op <= 3):
+        raise ValueError(f"Unsupported high-register op: op={op} rd={rd} rm={rm}")
+    return (
+        0x4400
+        | (op << 8)
+        | ((rm & 0x7) << 3)
+        | ((rm >> 3) << 6)
+        | (rd & 0x7)
+        | ((rd >> 3) << 7)
+    )
+
+
+def encode_thumb_eors(rd: int, rs: int) -> int:
+    return encode_thumb_alu(1, rd, rs)
+
+
+def encode_thumb_ands(rd: int, rs: int) -> int:
+    return encode_thumb_alu(0, rd, rs)
+
+
+def encode_thumb_muls(rd: int, rs: int) -> int:
+    return encode_thumb_alu(13, rd, rs)
+
+
+def encode_thumb_cmp(rd: int, rs: int) -> int:
+    return encode_thumb_alu(10, rd, rs)
 
 
 def build_canonical_post_call_hook(
@@ -1720,7 +2002,11 @@ def find_preferred_code_cave_near(
 def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list[str]:
     cmp_site = canonical_cmp_site(spec)
     cmp_offset = cmp_site.offset
-    hook_payload_size = 0x100
+    # KIRAPATCH_ENFORCE_METHOD1: reject shiny results whose PID+IVs do not form
+    # a Method-1 frame (keeps starters/gifts PKHeX-legal at the cost of a short
+    # in-game check on each shiny hit). Requires a larger hook payload.
+    enforce_method1 = os.environ.get("KIRAPATCH_ENFORCE_METHOD1", "").strip().lower() in {"1", "true", "yes", "on"}
+    hook_payload_size = 0x200 if enforce_method1 else 0x100
 
     cmp_hw = read_halfword(data, cmp_offset)
     if (cmp_hw & 0xFF00) != 0x2900:
@@ -1739,13 +2025,13 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
         create_mon_start,
     )
     outer_direct_sites: list[DirectPostCreateMonHookSite] = []
-    use_outer_wrapper_c = spec.game_code in {"BPRE", "BPGE"}
-    if spec.game_code in {"BPRE", "BPGE"}:
+    use_outer_wrapper_c = spec.game_code in FRLG_GAME_CODES
+    if spec.game_code in FRLG_GAME_CODES:
         outer_direct_sites = find_frlg_gift_create_mon_sites(data, create_mon_start)
         outer_direct_sites.extend(find_frlg_starter_create_mon_sites(data, create_mon_start))
         outer_direct_sites.extend(find_frlg_alt_starter_create_mon_sites(data, create_mon_start))
 
-    elif spec.game_code in {"AXVE", "AXPE"}:
+    elif spec.game_code in RS_GAME_CODES:
         outer_direct_sites = find_rs_starter_create_mon_sites(data, create_mon_start)
     outer_wrapper_sites = [
         site for site in wrapper_sites
@@ -1770,7 +2056,7 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
     def is_gift_direct(site: DirectPostCreateMonHookSite) -> bool:
         return site.name == "FRLG script GiveMon wrapper"
 
-    if spec.game_code == "BPRE" and not debug_filter:
+    if spec.game_code in FIRERED_GAME_CODES and not debug_filter:
         # FireRed starter signoff should stay on the GiveMon-owned outer reroll
         # path. Letting the primary CreateMon hook observe wrapper returns can
         # still produce mixed legality on otherwise identical 1/256 shiny runs,
@@ -1779,7 +2065,7 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
         # debugging.
         outer_direct_sites = [site for site in outer_direct_sites if is_gift_direct(site)]
 
-    if debug_filter and spec.game_code in {"BPRE", "BPGE"}:
+    if debug_filter and spec.game_code in FRLG_GAME_CODES:
 
         if debug_filter == "direct-only":
             outer_direct_sites = [site for site in outer_direct_sites if is_starter_direct(site)]
@@ -1832,9 +2118,20 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
     # Ruby starters already have a dedicated direct CreateMon hook. Keeping the
     # fixed-personality wrappers out of the reroll path avoids the intro
     # Poochyena getting force-rerolled while we harden the starter path.
-    if spec.game_code == "AXVE":
+    if spec.game_code in RUBY_GAME_CODES:
         outer_wrapper_sites = []
         skip_wrapper_sites = wrapper_sites
+    # KIRAPATCH_STARTER_SAFE=1 routes every creation through the primary
+    # CreateMon reroll only (no outer gift/starter/alt or fixed-personality
+    # wrapper hooks, and nothing is skipped). This is the same code path that
+    # keeps wild encounters PKHeX-legal, so it avoids the known upstream
+    # starter/gift illegality and corruption at the cost of not boosting
+    # fixed-personality script gifts.
+    starter_safe = os.environ.get("KIRAPATCH_STARTER_SAFE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if starter_safe:
+        outer_direct_sites = []
+        outer_wrapper_sites = []
+        skip_wrapper_sites = []
     skip_return_addrs = []
     if skip_wrapper_returns:
         skip_return_addrs.extend(
@@ -1861,7 +2158,9 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
         hook_sites.extend(find_secondary_create_box_wrapper_sites(data, primary_create_box_call))
 
     changes: list[str] = []
-    if debug_filter and spec.game_code in {"BPRE", "BPGE"}:
+    if starter_safe:
+        changes.append("[starter-safe] outer starter/gift/wrapper hooks disabled; primary CreateMon hook owns all creations")
+    if debug_filter and spec.game_code in FRLG_GAME_CODES:
         changes.append(f"[debug] FRLG starter hook filter: {debug_filter}")
     if primary_skip_mode != "all":
         changes.append(f"[debug] primary CreateMon skip mode: {primary_skip_mode}")
@@ -1881,7 +2180,7 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
         changes.append("[debug] FRLG GiveMon outer hook explicitly included")
     rerolls_remaining = max(0, plan.reroll_attempts - 1)
 
-    for hook_callsite, retry_target, counter_sp_word, restore_r3_sp_word, resume_halfwords in hook_sites:
+    for hook_idx, (hook_callsite, retry_target, counter_sp_word, restore_r3_sp_word, resume_halfwords) in enumerate(hook_sites):
         cave_offset = find_code_cave_near(data, hook_callsite, hook_payload_size)
         cave = data[cave_offset : cave_offset + hook_payload_size]
         if any(b not in (0x00, 0xFF) for b in cave):
@@ -1919,6 +2218,7 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
             skip_caller_returns=skip_caller_returns,
             skip_mode=primary_skip_mode,
             debug_trace_tag=DEBUG_TRACE_TAG_PRIMARY if trace_primary_hook else None,
+            enforce_method1=enforce_method1 and hook_idx == 0,
         )
 
         data[cave_offset : cave_offset + len(hook)] = hook
@@ -2057,6 +2357,11 @@ def detect_site_format(data: bytearray, site: PatchSite) -> str:
 
 
 def patch_data_legacy(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list[str]:
+    if not spec.patch_sites:
+        raise ValueError(
+            f"Legacy/native threshold patching is not available for {spec.name}. "
+            "Use --mode auto (canonical reroll) instead."
+        )
     threshold = plan.threshold
     if threshold < 1 or threshold > MAX_NATIVE_THRESHOLD:
         raise ValueError("Internal error: threshold must be in range 1..255.")
