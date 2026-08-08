@@ -1371,7 +1371,7 @@ def build_canonical_create_mon_hook(
     mark("counter_ready")
     emit_hw(0x0401)  # lsl r1,r0,#16 (isolates low-16 retry counter)
     emit_hw(0x2900)  # cmp r1,#0
-    emit_b_cond(0, "done")  # beq done (no retries left)
+    emit_b_cond(0, "counter_zero" if enforce_method1 else "done")  # beq (no retries left)
     emit_hw(0x3801)  # subs r0,#1
     emit_hw(0x9000 | (counter_sp_word & 0xFF))  # str r0,[sp,#counter_slot]
     emit_hw(0x9B00 | (restore_r3_sp_word & 0xFF))  # ldr r3,[sp,#restore_slot]
@@ -1391,7 +1391,20 @@ def build_canonical_create_mon_hook(
         emit_method1_verify(emit_hw, emit_ldr_literal, mark, emit_b_cond, emit_b)
         emit_hw(0x2800)  # cmp r0,#0
         emit_b_cond(1, "shiny_done")  # bne shiny_done (Method-1 valid)
-        emit_b("counter_load")        # invalid -> retry again
+        # Method-1 invalid: if the reroll budget is already exhausted, accept the
+        # shiny anyway so the player never ends up with a non-shiny result.
+        emit_hw(0x9800 | (counter_sp_word & 0xFF))  # ldr r0,[sp,#counter_slot]
+        emit_hw(0x0401)  # lsl r1,r0,#16
+        emit_hw(0x2900)  # cmp r1,#0
+        emit_b_cond(0, "shiny_done")  # beq shiny_done (budget exhausted -> keep shiny)
+        emit_b("counter_load")        # budget left -> keep hunting for Method-1
+
+        # Budget exhausted without a Method-1 shiny: keep re-rolling until a
+        # shiny appears (any method), which the shiny_check path above accepts.
+        mark("counter_zero")
+        emit_hw(0x9B00 | (restore_r3_sp_word & 0xFF))  # ldr r3,[sp,#restore_slot]
+        emit_ldr_literal(0, "retry_addr")
+        emit_hw(0x4700)  # bx r0
 
     mark("shiny_done")
     if debug_trace_tag is not None:
