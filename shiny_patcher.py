@@ -312,6 +312,11 @@ DEBUG_TRACE_FLAG_DONE = 0x454E4F44  # 'DONE'
 DEBUG_TRACE_FLAG_INIT = 0x54494E49  # 'INIT'
 DEBUG_TRACE_FLAG_READY = 0x59444552  # 'REDY'
 DEBUG_TRACE_FLAG_SHINY = 0x4E594853  # 'SHYN'
+# Scratch EWRAM word used to bound the post-budget Method-1 "hunt" so that
+# creations which can never be shiny (fixed personality / anti-shiny OTID)
+# do not re-roll forever.
+HOOK_METHOD1_HUNT_EWRAM_ADDR = 0x0203FF48
+METHOD1_HUNT_LIMIT = 0x100
 FIXED_WRAPPER_LAYOUTS = (
     WrapperHookLayout(
         name="fixed-personality wrapper A",
@@ -1367,6 +1372,11 @@ def build_canonical_create_mon_hook(
         emit_primary_trace_runtime_reset(1, 3)
     emit_ldr_literal(0, "counter_init")
     emit_hw(0x9000 | (counter_sp_word & 0xFF))  # str r0,[sp,#counter_slot]
+    if enforce_method1:
+        # Reset the bounded post-budget hunt counter for this creation.
+        emit_ldr_literal(0, "m1_hunt_init")
+        emit_ldr_literal(1, "m1_hunt_addr")
+        emit_hw(encode_thumb_str_imm(0, 1, 0))  # str r0,[r1]
 
     mark("counter_ready")
     emit_hw(0x0401)  # lsl r1,r0,#16 (isolates low-16 retry counter)
@@ -1399,9 +1409,28 @@ def build_canonical_create_mon_hook(
         emit_b_cond(0, "shiny_done")  # beq shiny_done (budget exhausted -> keep shiny)
         emit_b("counter_load")        # budget left -> keep hunting for Method-1
 
-        # Budget exhausted without a Method-1 shiny: keep re-rolling until a
-        # shiny appears (any method), which the shiny_check path above accepts.
+        # Budget exhausted without a Method-1 shiny: keep re-rolling for a
+        # shiny (any method), which shiny_check above accepts, but bound the
+        # hunt so creations that can never be shiny (fixed personality,
+        # anti-shiny OTID) fall through instead of freezing the game.
         mark("counter_zero")
+        emit_ldr_literal(0, "m1_hunt_addr")
+        emit_hw(0x6801)  # ldr r1,[r0] (hunt counter)
+        emit_hw(encode_thumb_lsrs(2, 1, 16))  # lsr r2,r1,#16 (magic)
+        emit_ldr_literal(3, "counter_magic_hi")
+        emit_hw(encode_thumb_cmp(2, 3))
+        emit_b_cond(0, "m1_hunt_ready")  # beq (already initialized)
+        emit_ldr_literal(1, "m1_hunt_init")
+        emit_hw(encode_thumb_str_imm(1, 0, 0))  # str r1,[r0]
+        emit_b("m1_hunt_retry")
+        mark("m1_hunt_ready")
+        emit_hw(encode_thumb_lsls(1, 1, 16))  # lsl r1,r1,#16 (low-16 count)
+        emit_hw(0x2900)  # cmp r1,#0
+        emit_b_cond(0, "done")  # beq done (hunt budget spent -> accept current)
+        emit_hw(0x3901)  # subs r1,#1
+        emit_ldr_literal(0, "m1_hunt_addr")
+        emit_hw(encode_thumb_str_imm(1, 0, 0))  # str r1,[r0]
+        mark("m1_hunt_retry")
         emit_hw(0x9B00 | (restore_r3_sp_word & 0xFF))  # ldr r3,[sp,#restore_slot]
         emit_ldr_literal(0, "retry_addr")
         emit_hw(0x4700)  # bx r0
@@ -1465,6 +1494,8 @@ def build_canonical_create_mon_hook(
             ("m1_mult", LCG_MULT),
             ("m1_add", LCG_ADD),
             ("m1_term", 0x10000),
+            ("m1_hunt_addr", HOOK_METHOD1_HUNT_EWRAM_ADDR),
+            ("m1_hunt_init", 0xA5A50000 | METHOD1_HUNT_LIMIT),
         ):
             mark(label)
             hook.extend((value & 0xFFFFFFFF).to_bytes(4, "little"))
