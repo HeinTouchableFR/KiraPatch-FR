@@ -426,6 +426,16 @@ def parse_args() -> argparse.Namespace:
         help="Allow overwriting an existing output file.",
     )
     parser.add_argument(
+        "--starter-legal",
+        action="store_true",
+        help=(
+            "Enable the starter legality correction: disables the fragile outer "
+            "starter/gift/wrapper hooks and rejects shiny results whose PID+IVs "
+            "are not a valid Method-1 frame, so starters come out shiny AND "
+            "PKHeX-legal. A short in-game check runs on each shiny hit."
+        ),
+    )
+    parser.add_argument(
         "--guided",
         action="store_true",
         help="Interactive wizard mode: scan a folder for ROMs and guide patching.",
@@ -1999,13 +2009,20 @@ def find_preferred_code_cave_near(
     return find_code_cave_near(data, branch_from, required_size)
 
 
-def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list[str]:
+def patch_data_canonical(
+    data: bytearray,
+    spec: RomSpec,
+    plan: OddsPlan,
+    starter_legal: bool = False,
+) -> list[str]:
     cmp_site = canonical_cmp_site(spec)
     cmp_offset = cmp_site.offset
-    # KIRAPATCH_ENFORCE_METHOD1: reject shiny results whose PID+IVs do not form
-    # a Method-1 frame (keeps starters/gifts PKHeX-legal at the cost of a short
-    # in-game check on each shiny hit). Requires a larger hook payload.
-    enforce_method1 = os.environ.get("KIRAPATCH_ENFORCE_METHOD1", "").strip().lower() in {"1", "true", "yes", "on"}
+    # KIRAPATCH_ENFORCE_METHOD1 / --starter-legal: reject shiny results whose
+    # PID+IVs do not form a Method-1 frame (keeps starters/gifts PKHeX-legal at
+    # the cost of a short in-game check on each shiny hit). Requires a larger
+    # hook payload.
+    enforce_method1 = starter_legal or os.environ.get("KIRAPATCH_ENFORCE_METHOD1", "").strip().lower() in {"1", "true", "yes", "on"}
+    starter_safe = starter_legal or os.environ.get("KIRAPATCH_STARTER_SAFE", "").strip().lower() in {"1", "true", "yes", "on"}
     hook_payload_size = 0x200 if enforce_method1 else 0x100
 
     cmp_hw = read_halfword(data, cmp_offset)
@@ -2121,13 +2138,12 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
     if spec.game_code in RUBY_GAME_CODES:
         outer_wrapper_sites = []
         skip_wrapper_sites = wrapper_sites
-    # KIRAPATCH_STARTER_SAFE=1 routes every creation through the primary
-    # CreateMon reroll only (no outer gift/starter/alt or fixed-personality
-    # wrapper hooks, and nothing is skipped). This is the same code path that
-    # keeps wild encounters PKHeX-legal, so it avoids the known upstream
-    # starter/gift illegality and corruption at the cost of not boosting
-    # fixed-personality script gifts.
-    starter_safe = os.environ.get("KIRAPATCH_STARTER_SAFE", "").strip().lower() in {"1", "true", "yes", "on"}
+    # KIRAPATCH_STARTER_SAFE / --starter-legal routes every creation through the
+    # primary CreateMon reroll only (no outer gift/starter/alt or
+    # fixed-personality wrapper hooks, and nothing is skipped). This is the same
+    # code path that keeps wild encounters PKHeX-legal, so it avoids the known
+    # upstream starter/gift illegality and corruption at the cost of not
+    # boosting fixed-personality script gifts.
     if starter_safe:
         outer_direct_sites = []
         outer_wrapper_sites = []
@@ -2160,6 +2176,8 @@ def patch_data_canonical(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list
     changes: list[str] = []
     if starter_safe:
         changes.append("[starter-safe] outer starter/gift/wrapper hooks disabled; primary CreateMon hook owns all creations")
+    if enforce_method1:
+        changes.append("[method-1] shiny results verified in-game for PID/IV Method-1 legality; invalid ones are re-rolled")
     if debug_filter and spec.game_code in FRLG_GAME_CODES:
         changes.append(f"[debug] FRLG starter hook filter: {debug_filter}")
     if primary_skip_mode != "all":
@@ -2398,9 +2416,9 @@ def patch_data_legacy(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list[st
     return changes
 
 
-def patch_data(data: bytearray, spec: RomSpec, plan: OddsPlan) -> list[str]:
+def patch_data(data: bytearray, spec: RomSpec, plan: OddsPlan, starter_legal: bool = False) -> list[str]:
     if plan.applied_mode == "canonical":
-        return patch_data_canonical(data, spec, plan)
+        return patch_data_canonical(data, spec, plan, starter_legal=starter_legal)
     return patch_data_legacy(data, spec, plan)
 
 
@@ -2480,6 +2498,7 @@ def patch_rom(
     output_path: Path | None,
     overwrite_output: bool,
     auto_rename_output: bool = False,
+    starter_legal: bool = False,
 ) -> int:
     if not input_path.exists():
         print(f"Error: input ROM not found: {input_path}")
@@ -2518,7 +2537,7 @@ def patch_rom(
 
     data = bytearray(input_path.read_bytes())
     try:
-        changes = patch_data(data, spec, plan)
+        changes = patch_data(data, spec, plan, starter_legal=starter_legal)
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
@@ -2654,6 +2673,7 @@ def main() -> int:
         output_path=args.output,
         overwrite_output=args.overwrite_output,
         auto_rename_output=False,
+        starter_legal=args.starter_legal,
     )
 
 

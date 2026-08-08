@@ -9,6 +9,7 @@ set "PASS_COUNT=0"
 set "FAIL_COUNT=0"
 set "SKIP_COUNT=0"
 set "PATCH_ALL=0"
+set "STARTER_LEGAL=0"
 
 if not exist "%PATCHER_SCRIPT%" (
   echo [ERROR] Could not find "%PATCHER_SCRIPT%" in this folder.
@@ -45,6 +46,11 @@ if /I "!ARG!"=="--all" (
   shift
   goto parse_opts
 )
+if /I "!ARG!"=="--starter-legal" (
+  set "STARTER_LEGAL=1"
+  shift
+  goto parse_opts
+)
 if /I "!ARG!"=="--odds" (
   if "%~2"=="" (
     echo [ERROR] --odds requires a value.
@@ -69,7 +75,7 @@ if /I "!ARG!"=="--mode" (
 )
 if "!ARG:~0,2!"=="--" (
   echo [ERROR] Unknown option: !ARG!
-  echo Supported options: --odds N --mode MODE --all
+  echo Supported options: --odds N --mode MODE --all --starter-legal
   pause
   exit /b 1
 )
@@ -107,6 +113,7 @@ echo === KiraPatch Test Launcher ===
 echo [INFO] Odds: 1/!RUN_ODDS!
 echo [INFO] Mode: !RUN_MODE!
 echo [INFO] Run tag: !RUN_TS!
+if "!STARTER_LEGAL!"=="1" echo [INFO] Starter legal fix: ENABLED
 echo.
 
 if "%~1"=="" if "%PATCH_ALL%"=="0" if exist ".roms\*.gba" set "PATCH_ALL=1"
@@ -127,6 +134,10 @@ if "%~1"=="" (
   echo Drag and drop one or more .gba files onto this launcher,
   echo or run it with --all to patch all ROMs in .roms.
   echo Example: KiraPatch.bat --odds 16 --mode auto --all
+  echo.
+  echo Add --starter-legal to also fix starters: they stay shiny and PKHeX-legal
+  echo by re-rolling any result whose PID/IVs are not a valid Method-1 frame.
+  echo Example: KiraPatch.bat --odds 16 --starter-legal --all
   echo.
   pause
   exit /b 1
@@ -157,7 +168,11 @@ call :build_output_path "%ROM_PATH%"
 
 echo [PATCH] "%ROM_PATH%"
 echo [OUT]   "!OUTPUT_PATH!"
-%PYTHON_CMD% "%PATCHER_SCRIPT%" "%ROM_PATH%" --odds !RUN_ODDS! --mode !RUN_MODE! --output "!OUTPUT_PATH!"
+if "!STARTER_LEGAL!"=="1" (
+  %PYTHON_CMD% "%PATCHER_SCRIPT%" "%ROM_PATH%" --odds !RUN_ODDS! --mode !RUN_MODE! --starter-legal --output "!OUTPUT_PATH!"
+) else (
+  %PYTHON_CMD% "%PATCHER_SCRIPT%" "%ROM_PATH%" --odds !RUN_ODDS! --mode !RUN_MODE! --output "!OUTPUT_PATH!"
+)
 if errorlevel 1 (
   echo [FAIL] "%ROM_PATH%"
   set /a FAIL_COUNT+=1

@@ -9,7 +9,7 @@
 > [!NOTE]
 > **This is a fork** of [eightmouse/KiraPatch](https://github.com/eightmouse/KiraPatch) with two additions on top of the original:
 > - **French ROM support** — the five France revisions (Rubis, Saphir, Rouge Feu, Vert Feuille, Émeraude) are now detected by CRC32 and patched in `auto`/`canonical`/`reroll` modes.
-> - **PKHeX-legal starters** — the primary reroll hook can verify that a shiny result's PID+IVs form a valid Method-1 frame and keep re-rolling otherwise, so starters come out shiny *and* legal (instead of the "PID Type: None" / "Method_2" results of the vanilla reroll). Set `KIRAPATCH_ENFORCE_METHOD1=1` (optionally together with `KIRAPATCH_STARTER_SAFE=1`) to enable it.
+> - **PKHeX-legal starters** — the primary reroll hook can verify that a shiny result's PID+IVs form a valid Method-1 frame and keep re-rolling otherwise, so starters come out shiny *and* legal (instead of the "PID Type: None" / "Method_2" results of the vanilla reroll). Pass `--starter-legal` (or `KiraPatch.bat --starter-legal`) to enable it.
 
 > [!IMPORTANT]
 > Current status: I am in the last stretch of Method 1 starter closure for the next release. Local testing is in a much better place now, and the current focus is locking the final starter path down cleanly before moving on.
@@ -65,15 +65,19 @@ That means:
 ### Starter/gift legality note
 The public build re-rolls starters and script gifts through dedicated outer hooks (gift / starter / fixed-personality wrappers). On FireRed/LeafGreen those paths are still under active hardening upstream: starters can come out with a PID+IV combination that PKHeX flags as "PID Type: None" (PID+IV correlation does not match a known generation method), and rare odds can occasionally corrupt the starter. This affects USA/EU ROMs too (upstream issues #1/#2/#3); it is not specific to the FR revisions.
 
-If you want starters to stay PKHeX-legal, enable the starter-safe + Method-1 enforcement modes when launching:
+If you want starters to stay PKHeX-legal, pass `--starter-legal` when patching (CLI or via `KiraPatch.bat`):
 
 ```bash
-set KIRAPATCH_STARTER_SAFE=1
-set KIRAPATCH_ENFORCE_METHOD1=1
-python shiny_patcher.py "Rouge Feu.gba" --odds 64 --mode auto
+python shiny_patcher.py "Rouge Feu.gba" --odds 64 --mode auto --starter-legal
 ```
 
-Or double-click `KiraPatch_STARTER_SAFE.bat` to open the GUI with both modes enabled. In this configuration the outer starter/gift/wrapper hooks are not installed (every creation, starters included, goes through the primary `CreateMon` reroll path), and the primary hook **rejects any shiny result whose PID+IVs do not form a valid Method-1 frame** (the correlation PKHeX expects for a static encounter), keeping rerolling until it finds one. Each shiny hit runs a short in-game check (~0.1-0.3 s), so a brief lag/freeze is expected on shiny encounters only.
+or
+
+```bat
+KiraPatch.bat --odds 64 --starter-legal --all
+```
+
+In this configuration the outer starter/gift/wrapper hooks are not installed (every creation, starters included, goes through the primary `CreateMon` reroll path), and the primary hook **rejects any shiny result whose PID+IVs do not form a valid Method-1 frame** (the correlation PKHeX expects for a static encounter), keeping rerolling until it finds one. Each shiny hit runs a short in-game check (~0.1-0.3 s), so a brief lag/freeze is expected on shiny encounters only.
 
 Result: no Bad Eggs and starters that stay PKHeX-legal (Method-1) instead of the vanilla-reroll's "PID Type: None"/"Method_2", at the cost of not boosting fixed-personality script gifts.
 
