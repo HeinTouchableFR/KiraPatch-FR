@@ -6,6 +6,11 @@
 
 # KiraPatch
 
+> [!NOTE]
+> **This is a fork** of [eightmouse/KiraPatch](https://github.com/eightmouse/KiraPatch) with two additions on top of the original:
+> - **French ROM support** — the five France revisions (Rubis, Saphir, Rouge Feu, Vert Feuille, Émeraude) are now detected by CRC32 and patched in `auto`/`canonical`/`reroll` modes.
+> - **PKHeX-legal starters** — the primary reroll hook can verify that a shiny result's PID+IVs form a valid Method-1 frame and keep re-rolling otherwise, so starters come out shiny *and* legal (instead of the "PID Type: None" / "Method_2" results of the vanilla reroll). Set `KIRAPATCH_ENFORCE_METHOD1=1` (optionally together with `KIRAPATCH_STARTER_SAFE=1`) to enable it.
+
 > [!IMPORTANT]
 > Current status: I am in the last stretch of Method 1 starter closure for the next release. Local testing is in a much better place now, and the current focus is locking the final starter path down cleanly before moving on.
 >
